@@ -53,7 +53,11 @@ defmodule VibeSmartcell do
         case provider.list_models() do  # Pass nil, let provider handle its own config
           models when is_list(models) ->
             # Add provider information to each model
-            Enum.map(models, fn model -> Map.put(model, :provider, provider) end)
+            Enum.map(models, fn model ->
+              model
+              |> Map.put(:provider, provider)
+              |> Map.put(:name, "#{provider.name()} - #{model.name}")
+            end)
           {:error, _reason} ->
             []
         end
@@ -162,7 +166,7 @@ defmodule VibeSmartcell do
     |> Enum.map(fn provider ->
       Enum.map(provider.example_config, fn {k, v} ->
         """
-        #     #{k}: #{v}
+        #     #{k}: #{v},
         """
       end)
       |> Enum.join()

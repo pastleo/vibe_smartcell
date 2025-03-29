@@ -4,7 +4,7 @@ defmodule VibeSmartcell.MixProject do
   def project do
     [
       app: :vibe_smartcell,
-      version: "0.1.1",
+      version: "0.1.2",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps()
@@ -22,9 +22,9 @@ defmodule VibeSmartcell.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:anthropix, "~> 0.6"},
       {:kino, "~> 0.15.0"},
       {:httpoison, "~> 2.0"},
+      {:jason, "~> 1.4"},
     ]
   end
 end
