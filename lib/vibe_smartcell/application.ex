@@ -7,7 +7,7 @@ defmodule VibeSmartcell.Application do
 
   @impl true
   def start(_type, _args) do
-    Kino.SmartCell.register(VibeSmartcell)
+    Kino.SmartCell.register(VibeCoderSmartcell)
     children = []
     opts = [strategy: :one_for_one, name: HandsontableKinoSmartcell.Supervisor]
     Supervisor.start_link(children, opts)
