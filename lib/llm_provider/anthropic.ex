@@ -19,7 +19,8 @@ defmodule LlmProvider.Anthropic do
     api_key = Application.get_env(:vibe_smartcell, @config_key)
 
     if is_nil(api_key) do
-      []  # Return empty list if no API key is configured
+      # Return empty list if no API key is configured
+      []
     else
       url = "#{@base_url}/models"
 
@@ -52,7 +53,8 @@ defmodule LlmProvider.Anthropic do
     api_key = Application.get_env(:vibe_smartcell, @config_key)
 
     if is_nil(api_key) do
-      send(pid, {:provider_not_configured, __MODULE__})  # Send error with provider info
+      # Send error with provider info
+      send(pid, {:provider_not_configured, __MODULE__})
       :ok
     else
       url = "#{@base_url}/messages"
@@ -61,15 +63,16 @@ defmodule LlmProvider.Anthropic do
       system_prompt = LlmProvider.system_prompt()
 
       # Prepare the request body
-      body = Jason.encode!(%{
-        model: model,
-        max_tokens: @max_tokens,
-        system: system_prompt,
-        messages: [
-          %{role: "user", content: prompt}
-        ],
-        stream: true
-      })
+      body =
+        Jason.encode!(%{
+          model: model,
+          max_tokens: @max_tokens,
+          system: system_prompt,
+          messages: [
+            %{role: "user", content: prompt}
+          ],
+          stream: true
+        })
 
       headers = [
         {"x-api-key", api_key},
@@ -79,7 +82,12 @@ defmodule LlmProvider.Anthropic do
 
       try do
         # Stream the response
-        case HTTPoison.post(url, body, headers, [stream_to: self(), async: :once, timeout: 60000, recv_timeout: 60000]) do
+        case HTTPoison.post(url, body, headers,
+               stream_to: self(),
+               async: :once,
+               timeout: 60000,
+               recv_timeout: 60000
+             ) do
           {:ok, %HTTPoison.AsyncResponse{id: id}} ->
             receive_anthropic_response(id, pid, "", "")
 
@@ -99,12 +107,86 @@ defmodule LlmProvider.Anthropic do
   end
 
   @impl true
-  def example_config, do: %{
-    @config_key => "System.fetch_env!(\"LB_VIBE_ANTHROPIC_API_KEY\")"
-  }
+  def generate_chat_response(messages, model, pid) do
+    api_key = Application.get_env(:vibe_smartcell, @config_key)
+
+    if is_nil(api_key) do
+      # Send error with provider info
+      send(pid, {:provider_not_configured, __MODULE__})
+      :ok
+    else
+      url = "#{@base_url}/messages"
+
+      # Convert messages to Anthropic format
+      # Anthropic doesn't support 'system' in messages array, but as a separate field
+      {system_message, user_messages} = extract_system_message(messages)
+
+      # Prepare the request body
+      body =
+        Jason.encode!(%{
+          model: model,
+          max_tokens: @max_tokens,
+          system: system_message,
+          messages: user_messages,
+          stream: true
+        })
+
+      headers = [
+        {"x-api-key", api_key},
+        {"anthropic-version", @anthropic_version},
+        {"Content-Type", "application/json"}
+      ]
+
+      try do
+        # Stream the response
+        case HTTPoison.post(url, body, headers,
+               stream_to: self(),
+               async: :once,
+               timeout: 60000,
+               recv_timeout: 60000
+             ) do
+          {:ok, %HTTPoison.AsyncResponse{id: id}} ->
+            receive_anthropic_chat_response(id, pid, "", "")
+
+          {:error, reason} ->
+            error_message = "Error generating response: #{inspect(reason)}"
+            send(pid, {:chat_complete, error_message})
+        end
+
+        :ok
+      rescue
+        e ->
+          error_message = "Error generating response: #{inspect(e)}"
+          send(pid, {:chat_complete, error_message})
+          :ok
+      end
+    end
+  end
 
   @impl true
-  def config_additional_info, do: "Anthropic's Claude models require an API key. You can obtain one at https://console.anthropic.com/settings/keys"
+  def example_config,
+    do: %{
+      @config_key => "System.fetch_env!(\"LB_VIBE_ANTHROPIC_API_KEY\")"
+    }
+
+  @impl true
+  def config_additional_info,
+    do:
+      "Anthropic's Claude models require an API key. You can obtain one at https://console.anthropic.com/settings/keys"
+
+  # Helper function to extract system message from messages array
+  defp extract_system_message(messages) do
+    system_messages = Enum.filter(messages, fn %{role: role} -> role == "system" end)
+    user_messages = Enum.filter(messages, fn %{role: role} -> role != "system" end)
+
+    system_content =
+      case system_messages do
+        [%{content: content} | _] -> content
+        _ -> "You are a helpful assistant."
+      end
+
+    {system_content, user_messages}
+  end
 
   # Helper function to stream the response from Anthropic
   defp receive_anthropic_response(id, pid, chunk_acc, result_acc) do
@@ -112,6 +194,15 @@ defmodule LlmProvider.Anthropic do
       response -> handle_anthropic_response(response, id, pid, chunk_acc, result_acc)
     after
       60000 -> send(pid, {:generation_complete, result_acc})
+    end
+  end
+
+  # Helper function to stream the chat response from Anthropic
+  defp receive_anthropic_chat_response(id, pid, chunk_acc, result_acc) do
+    receive do
+      response -> handle_anthropic_chat_response(response, id, pid, chunk_acc, result_acc)
+    after
+      60000 -> send(pid, {:chat_complete, result_acc})
     end
   end
 
@@ -129,9 +220,11 @@ defmodule LlmProvider.Anthropic do
         HTTPoison.stream_next(%HTTPoison.AsyncResponse{id: id})
 
         {text, incomplete_chunk} = parse_sse_chunk(chunk_acc <> chunk)
+
         if text != "" do
           send(pid, {:code_chunk, text})
         end
+
         receive_anthropic_response(id, pid, incomplete_chunk, result_acc <> text)
 
       %HTTPoison.AsyncEnd{id: ^id} ->
@@ -141,6 +234,40 @@ defmodule LlmProvider.Anthropic do
         Logger.warning("handle_anthropic_response unknown_response: #{inspect(unknown_response)}")
         HTTPoison.stream_next(%HTTPoison.AsyncResponse{id: id})
         receive_anthropic_response(id, pid, chunk_acc, result_acc)
+    end
+  end
+
+  defp handle_anthropic_chat_response(response, id, pid, chunk_acc, result_acc) do
+    case response do
+      %HTTPoison.AsyncStatus{id: ^id, code: code} when code in 200..299 ->
+        HTTPoison.stream_next(%HTTPoison.AsyncResponse{id: id})
+        receive_anthropic_chat_response(id, pid, chunk_acc, result_acc)
+
+      %HTTPoison.AsyncHeaders{id: ^id} ->
+        HTTPoison.stream_next(%HTTPoison.AsyncResponse{id: id})
+        receive_anthropic_chat_response(id, pid, chunk_acc, result_acc)
+
+      %HTTPoison.AsyncChunk{id: ^id, chunk: chunk} ->
+        HTTPoison.stream_next(%HTTPoison.AsyncResponse{id: id})
+
+        {text, incomplete_chunk} = parse_sse_chunk(chunk_acc <> chunk)
+
+        if text != "" do
+          send(pid, {:response_chunk, text})
+        end
+
+        receive_anthropic_chat_response(id, pid, incomplete_chunk, result_acc <> text)
+
+      %HTTPoison.AsyncEnd{id: ^id} ->
+        send(pid, {:chat_complete, result_acc})
+
+      unknown_response ->
+        Logger.warning(
+          "handle_anthropic_chat_response unknown_response: #{inspect(unknown_response)}"
+        )
+
+        HTTPoison.stream_next(%HTTPoison.AsyncResponse{id: id})
+        receive_anthropic_chat_response(id, pid, chunk_acc, result_acc)
     end
   end
 
@@ -172,10 +299,12 @@ defmodule LlmProvider.Anthropic do
       # Data for current event
       String.starts_with?(line, "data: ") and is_map(current_event) ->
         data_str = String.trim(String.replace(line, "data: ", ""))
-        data = case Jason.decode(data_str) do
-          {:ok, parsed} -> parsed
-          _ -> data_str
-        end
+
+        data =
+          case Jason.decode(data_str) do
+            {:ok, parsed} -> parsed
+            _ -> data_str
+          end
 
         event = Map.put(current_event, :data, data)
 
@@ -192,12 +321,13 @@ defmodule LlmProvider.Anthropic do
 
       # Any other line - keep as part of remaining
       true ->
-        remaining = if current_event == "" do
-          line
-        else
-          # If we have a partial event, keep it in the remaining
-          Jason.encode!(current_event) <> "\n" <> line
-        end
+        remaining =
+          if current_event == "" do
+            line
+          else
+            # If we have a partial event, keep it in the remaining
+            Jason.encode!(current_event) <> "\n" <> line
+          end
 
         {events_acc, remaining <> "\n" <> Enum.join(rest, "\n")}
     end
@@ -210,9 +340,19 @@ defmodule LlmProvider.Anthropic do
       _ -> false
     end)
     |> Enum.map(fn
-      %{data: %{"type" => "content_block_delta", "delta" => %{"type" => "text_delta", "text" => text}}} -> text
-      %{data: %{"delta" => %{"type" => "text_delta", "text" => text}}} -> text
-      _ -> ""
+      %{
+        data: %{
+          "type" => "content_block_delta",
+          "delta" => %{"type" => "text_delta", "text" => text}
+        }
+      } ->
+        text
+
+      %{data: %{"delta" => %{"type" => "text_delta", "text" => text}}} ->
+        text
+
+      _ ->
+        ""
     end)
     |> Enum.join("")
   end

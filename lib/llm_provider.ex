@@ -10,7 +10,7 @@ defmodule LlmProvider do
     [
       LlmProvider.Anthropic,
       LlmProvider.OpenAI,
-      LlmProvider.Ollama,
+      LlmProvider.Ollama
     ]
   end
 

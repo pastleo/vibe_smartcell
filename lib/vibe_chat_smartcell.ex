@@ -1,7 +1,7 @@
-defmodule VibeCoderSmartcell do
-  use Kino.JS, assets_path: "lib/assets/vibe_coder_smartcell"
+defmodule VibeChatSmartcell do
+  use Kino.JS, assets_path: "lib/assets/vibe_chat_smartcell"
   use Kino.JS.Live
-  use Kino.SmartCell, name: "Vibe Coder"
+  use Kino.SmartCell, name: "Vibe Chat"
 
   alias VibeSmartcell.ConfigExampleHelper
 
@@ -9,14 +9,12 @@ defmodule VibeCoderSmartcell do
 
   @impl true
   def init(attrs, ctx) do
-    source = attrs["source"] || ""
-    prompt = attrs["prompt"] || ""
+    messages = attrs["messages"] || []
     model = attrs["model"] || ""
 
     ctx =
       assign(ctx,
-        source: source,
-        prompt: prompt,
+        messages: messages,
         model: model,
         loading: false,
         models: [],
@@ -36,11 +34,10 @@ defmodule VibeCoderSmartcell do
   @impl true
   def handle_connect(ctx) do
     payload = %{
-      prompt: ctx.assigns.prompt,
+      messages: ctx.assigns.messages,
       model: ctx.assigns.model,
       models: ctx.assigns.models,
       loading: ctx.assigns.loading,
-      source: ctx.assigns.source,
       error_message: ctx.assigns.error_message
     }
 
@@ -93,15 +90,25 @@ defmodule VibeCoderSmartcell do
   end
 
   @impl true
-  def handle_info({:code_chunk, chunk}, ctx) do
-    broadcast_event(ctx, "code_chunk", %{chunk: chunk})
+  def handle_info({:response_chunk, chunk}, ctx) do
+    broadcast_event(ctx, "response_chunk", %{chunk: chunk})
     {:noreply, ctx}
   end
 
   @impl true
-  def handle_info({:generation_complete, source}, ctx) do
-    ctx = assign(ctx, source: source, loading: false)
-    broadcast_event(ctx, "generation_complete", %{source: source})
+  def handle_info({:chat_complete, response}, ctx) do
+    # Add the assistant's response to messages
+    updated_messages = ctx.assigns.messages ++ [%{role: "assistant", content: response}]
+
+    ctx =
+      assign(ctx,
+        messages: updated_messages,
+        loading: false
+      )
+
+    broadcast_event(ctx, "chat_complete", %{
+      messages: updated_messages
+    })
 
     {:noreply, ctx}
   end
@@ -118,26 +125,19 @@ defmodule VibeCoderSmartcell do
   end
 
   @impl true
-  def handle_event("update_prompt", %{"prompt" => prompt}, ctx) do
-    {:noreply, assign(ctx, prompt: prompt)}
-  end
-
-  @impl true
-  def handle_event("update_source", %{"source" => source}, ctx) do
-    {:noreply, assign(ctx, source: source)}
-  end
-
-  @impl true
-  def handle_event("generate", _params, ctx) do
+  def handle_event("send_message", %{"message" => message}, ctx) do
     if ctx.assigns.loading do
       {:noreply, ctx}
     else
+      # Add the user message to the messages list
+      updated_messages = ctx.assigns.messages ++ [%{role: "user", content: message}]
       # Clear any previous error message
-      ctx = assign(ctx, loading: true, error_message: nil)
-      broadcast_event(ctx, "generation_started", %{})
+      ctx = assign(ctx, messages: updated_messages, loading: true, error_message: nil)
+
+      broadcast_event(ctx, "message_sent", %{messages: updated_messages})
       broadcast_event(ctx, "update_error", %{error_message: nil})
 
-      # Start the generation process in a separate task
+      # Start the chat process in a separate task
       pid = self()
 
       Task.start(fn ->
@@ -147,13 +147,19 @@ defmodule VibeCoderSmartcell do
         provider = find_provider_for_model(model_id, ctx.assigns.models)
 
         if provider do
-          provider.generate_code(ctx.assigns.prompt, model_id, pid)
+          # Convert messages to the format expected by the provider
+          formatted_messages =
+            Enum.map(updated_messages, fn %{role: role, content: content} ->
+              %{role: role, content: content}
+            end)
+
+          provider.generate_chat_response(formatted_messages, model_id, pid)
         else
-          error_message = "# Error: Selected model not found or provider not available"
+          error_message = "Error: Selected model not found or provider not available"
           ctx = assign(ctx, error_message: error_message, loading: false)
           broadcast_event(ctx, "update_error", %{error_message: error_message})
           # Also broadcast loading state change
-          broadcast_event(ctx, "generation_complete", %{source: ctx.assigns.source})
+          broadcast_event(ctx, "chat_complete", %{messages: updated_messages})
         end
       end)
 
@@ -162,17 +168,26 @@ defmodule VibeCoderSmartcell do
   end
 
   @impl true
+  def handle_event("clear_chat", _params, ctx) do
+    # Clear messages and any error message
+    ctx = assign(ctx, messages: [], error_message: nil)
+    broadcast_event(ctx, "chat_cleared", %{})
+    broadcast_event(ctx, "update_error", %{error_message: nil})
+
+    {:noreply, ctx}
+  end
+
+  @impl true
   def to_attrs(ctx) do
     %{
-      "source" => ctx.assigns.source,
-      "prompt" => ctx.assigns.prompt,
+      "messages" => ctx.assigns.messages,
       "model" => ctx.assigns.model
     }
   end
 
   @impl true
-  def to_source(attrs) do
-    attrs["source"]
+  def to_source(_attrs) do
+    ":noop"
   end
 
   # Find the provider for a specific model ID
@@ -186,7 +201,7 @@ defmodule VibeCoderSmartcell do
   defp show_error_with_config_example(ctx, providers, message) do
     error_message = ConfigExampleHelper.generate(providers, message)
     broadcast_event(ctx, "update_error", %{error_message: error_message})
-    broadcast_event(ctx, "generation_complete", %{source: ctx.assigns.source})
+    broadcast_event(ctx, "chat_complete", %{messages: ctx.assigns.messages})
     assign(ctx, error_message: error_message, loading: false)
   end
 end
